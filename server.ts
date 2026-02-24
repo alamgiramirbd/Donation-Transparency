@@ -1,6 +1,6 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import Database from "better-sqlite3";
+import { createClient } from "@supabase/supabase-js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
@@ -16,58 +16,10 @@ const app = express();
 const PORT = 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "donation-transparency-secret-key";
 
-// Database initialization
-const db = new Database("donations.db");
-
-// Create tables
-db.exec(`
-  CREATE TABLE IF NOT EXISTS admin (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS categories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    category_id INTEGER NOT NULL,
-    description TEXT,
-    FOREIGN KEY (category_id) REFERENCES categories(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS incomes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    receipt_number TEXT UNIQUE NOT NULL,
-    amount REAL NOT NULL,
-    project_id INTEGER NOT NULL,
-    donor_name TEXT,
-    date TEXT NOT NULL,
-    notes TEXT,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS expenses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    amount REAL NOT NULL,
-    project_id INTEGER NOT NULL,
-    description TEXT NOT NULL,
-    date TEXT NOT NULL,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
-  );
-`);
-
-// Create default admin if not exists
-const adminExists = db.prepare("SELECT * FROM admin WHERE username = ?").get("admin");
-if (!adminExists) {
-  const hashedPassword = bcrypt.hashSync("admin123", 10);
-  db.prepare("INSERT INTO admin (username, password) VALUES (?, ?)").run("admin", hashedPassword);
-  console.log("Default admin created: admin / admin123");
-}
+// Supabase initialization
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_ANON_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Middleware
 app.use(express.json());
@@ -89,167 +41,219 @@ const authenticate = (req: any, res: any, next: any) => {
 // API Routes
 
 // Public Stats
-app.get("/api/stats", (req, res) => {
-  const totalIncome = db.prepare("SELECT SUM(amount) as total FROM incomes").get() as any;
-  const totalExpense = db.prepare("SELECT SUM(amount) as total FROM expenses").get() as any;
-  const projectStats = db.prepare(`
-    SELECT 
-      p.name, 
-      p.id,
-      COALESCE(SUM(i.amount), 0) as income,
-      COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.project_id = p.id), 0) as expense
-    FROM projects p
-    LEFT JOIN incomes i ON i.project_id = p.id
-    GROUP BY p.id
-  `).all();
+app.get("/api/stats", async (req, res) => {
+  try {
+    const { data: incomes, error: incomeError } = await supabase.from("incomes").select("amount");
+    const { data: expenses, error: expenseError } = await supabase.from("expenses").select("amount");
+    const { data: projects, error: projectError } = await supabase.from("projects").select("id, name");
 
-  res.json({
-    totalIncome: totalIncome?.total || 0,
-    totalExpense: totalExpense?.total || 0,
-    balance: (totalIncome?.total || 0) - (totalExpense?.total || 0),
-    projects: projectStats
-  });
+    if (incomeError || expenseError || projectError) throw incomeError || expenseError || projectError;
+
+    const totalIncome = incomes.reduce((sum, i) => sum + i.amount, 0);
+    const totalExpense = expenses.reduce((sum, e) => sum + e.amount, 0);
+
+    // Get project stats
+    const projectStats = await Promise.all(projects.map(async (p) => {
+      const { data: pIncomes } = await supabase.from("incomes").select("amount").eq("project_id", p.id);
+      const { data: pExpenses } = await supabase.from("expenses").select("amount").eq("project_id", p.id);
+      
+      const pIncomeSum = pIncomes?.reduce((sum, i) => sum + i.amount, 0) || 0;
+      const pExpenseSum = pExpenses?.reduce((sum, e) => sum + e.amount, 0) || 0;
+
+      return {
+        id: p.id,
+        name: p.name,
+        income: pIncomeSum,
+        expense: pExpenseSum
+      };
+    }));
+
+    res.json({
+      totalIncome,
+      totalExpense,
+      balance: totalIncome - totalExpense,
+      projects: projectStats
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Auth
-app.post("/api/login", (req, res) => {
+app.post("/api/login", async (req, res) => {
   const { username, password } = req.body;
-  const admin = db.prepare("SELECT * FROM admin WHERE username = ?").get(username) as any;
+  try {
+    const { data: admin, error } = await supabase.from("admin").select("*").eq("username", username).single();
 
-  if (admin && bcrypt.compareSync(password, admin.password)) {
-    const token = jwt.sign({ id: admin.id, username: admin.username }, JWT_SECRET, { expiresIn: "24h" });
-    res.json({ token });
-  } else {
+    if (admin && bcrypt.compareSync(password, admin.password)) {
+      const token = jwt.sign({ id: admin.id, username: admin.username }, JWT_SECRET, { expiresIn: "24h" });
+      res.json({ token });
+    } else {
+      res.status(401).json({ error: "Invalid credentials" });
+    }
+  } catch (err: any) {
     res.status(401).json({ error: "Invalid credentials" });
   }
 });
 
 // Categories
-app.get("/api/categories", (req, res) => {
-  const categories = db.prepare("SELECT * FROM categories").all();
-  res.json(categories);
+app.get("/api/categories", async (req, res) => {
+  const { data, error } = await supabase.from("categories").select("*");
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
-app.post("/api/categories", authenticate, (req, res) => {
+app.post("/api/categories", authenticate, async (req, res) => {
   const { name } = req.body;
-  try {
-    const result = db.prepare("INSERT INTO categories (name) VALUES (?)").run(name);
-    res.json({ id: result.lastInsertRowid, name });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase.from("categories").insert([{ name }]).select().single();
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
-app.put("/api/categories/:id", authenticate, (req, res) => {
+app.put("/api/categories/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const { name } = req.body;
-  try {
-    db.prepare("UPDATE categories SET name = ? WHERE id = ?").run(name, id);
-    res.json({ id, name });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase.from("categories").update({ name }).eq("id", id).select().single();
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
 // Projects
-app.get("/api/projects", (req, res) => {
-  const projects = db.prepare(`
-    SELECT p.*, c.name as category_name 
-    FROM projects p 
-    JOIN categories c ON p.category_id = c.id
-  `).all();
+app.get("/api/projects", async (req, res) => {
+  const { data, error } = await supabase
+    .from("projects")
+    .select(`
+      *,
+      categories (name)
+    `);
+  
+  if (error) return res.status(400).json({ error: error.message });
+  
+  // Flatten category name
+  const projects = data.map(p => ({
+    ...p,
+    category_name: (p as any).categories?.name
+  }));
+  
   res.json(projects);
 });
 
-app.post("/api/projects", authenticate, (req, res) => {
+app.post("/api/projects", authenticate, async (req, res) => {
   const { name, category_id, description } = req.body;
-  try {
-    const result = db.prepare("INSERT INTO projects (name, category_id, description) VALUES (?, ?, ?)")
-      .run(name, category_id, description);
-    res.json({ id: result.lastInsertRowid, name, category_id, description });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase
+    .from("projects")
+    .insert([{ name, category_id, description }])
+    .select()
+    .single();
+  
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
-app.put("/api/projects/:id", authenticate, (req, res) => {
+app.put("/api/projects/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const { name, category_id, description } = req.body;
-  try {
-    db.prepare("UPDATE projects SET name = ?, category_id = ?, description = ? WHERE id = ?")
-      .run(name, category_id, description, id);
-    res.json({ id, name, category_id, description });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase
+    .from("projects")
+    .update({ name, category_id, description })
+    .eq("id", id)
+    .select()
+    .single();
+  
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
 // Incomes
-app.get("/api/incomes", (req, res) => {
-  const incomes = db.prepare(`
-    SELECT i.*, p.name as project_name 
-    FROM incomes i 
-    JOIN projects p ON i.project_id = p.id
-    ORDER BY i.date DESC
-  `).all();
+app.get("/api/incomes", async (req, res) => {
+  const { data, error } = await supabase
+    .from("incomes")
+    .select(`
+      *,
+      projects (name)
+    `)
+    .order("date", { ascending: false });
+  
+  if (error) return res.status(400).json({ error: error.message });
+  
+  const incomes = data.map(i => ({
+    ...i,
+    project_name: (i as any).projects?.name
+  }));
+  
   res.json(incomes);
 });
 
-app.post("/api/incomes", authenticate, (req, res) => {
+app.post("/api/incomes", authenticate, async (req, res) => {
   const { receipt_number, amount, project_id, donor_name, date, notes } = req.body;
-  try {
-    const result = db.prepare("INSERT INTO incomes (receipt_number, amount, project_id, donor_name, date, notes) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(receipt_number, amount, project_id, donor_name, date, notes);
-    res.json({ id: result.lastInsertRowid, receipt_number, amount, project_id, donor_name, date, notes });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase
+    .from("incomes")
+    .insert([{ receipt_number, amount, project_id, donor_name, date, notes }])
+    .select()
+    .single();
+  
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
-app.put("/api/incomes/:id", authenticate, (req, res) => {
+app.put("/api/incomes/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const { receipt_number, amount, project_id, donor_name, date, notes } = req.body;
-  try {
-    db.prepare("UPDATE incomes SET receipt_number = ?, amount = ?, project_id = ?, donor_name = ?, date = ?, notes = ? WHERE id = ?")
-      .run(receipt_number, amount, project_id, donor_name, date, notes, id);
-    res.json({ id, receipt_number, amount, project_id, donor_name, date, notes });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase
+    .from("incomes")
+    .update({ receipt_number, amount, project_id, donor_name, date, notes })
+    .eq("id", id)
+    .select()
+    .single();
+  
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
 // Expenses
-app.get("/api/expenses", (req, res) => {
-  const expenses = db.prepare(`
-    SELECT e.*, p.name as project_name 
-    FROM expenses e 
-    JOIN projects p ON e.project_id = p.id
-    ORDER BY e.date DESC
-  `).all();
+app.get("/api/expenses", async (req, res) => {
+  const { data, error } = await supabase
+    .from("expenses")
+    .select(`
+      *,
+      projects (name)
+    `)
+    .order("date", { ascending: false });
+  
+  if (error) return res.status(400).json({ error: error.message });
+  
+  const expenses = data.map(e => ({
+    ...e,
+    project_name: (e as any).projects?.name
+  }));
+  
   res.json(expenses);
 });
 
-app.post("/api/expenses", authenticate, (req, res) => {
+app.post("/api/expenses", authenticate, async (req, res) => {
   const { amount, project_id, description, date } = req.body;
-  try {
-    const result = db.prepare("INSERT INTO expenses (amount, project_id, description, date) VALUES (?, ?, ?, ?)")
-      .run(amount, project_id, description, date);
-    res.json({ id: result.lastInsertRowid, amount, project_id, description, date });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase
+    .from("expenses")
+    .insert([{ amount, project_id, description, date }])
+    .select()
+    .single();
+  
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
-app.put("/api/expenses/:id", authenticate, (req, res) => {
+app.put("/api/expenses/:id", authenticate, async (req, res) => {
   const { id } = req.params;
   const { amount, project_id, description, date } = req.body;
-  try {
-    db.prepare("UPDATE expenses SET amount = ?, project_id = ?, description = ?, date = ? WHERE id = ?")
-      .run(amount, project_id, description, date, id);
-    res.json({ id, amount, project_id, description, date });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
+  const { data, error } = await supabase
+    .from("expenses")
+    .update({ amount, project_id, description, date })
+    .eq("id", id)
+    .select()
+    .single();
+  
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
 });
 
 // Vite middleware for development
