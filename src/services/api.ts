@@ -17,6 +17,16 @@ export const api = {
     if (!res.ok) throw new Error("Invalid credentials");
     return res.json();
   },
+  async changePassword(passwords: any) {
+    const res = await fetch("/api/change-password", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...getAuthHeader() },
+      body: JSON.stringify(passwords),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to change password");
+    return data;
+  },
   async getCategories() {
     const res = await fetch("/api/categories");
     return res.json();

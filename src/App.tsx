@@ -364,7 +364,7 @@ const AdminPanel = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [incomes, setIncomes] = useState<Income[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
-  const [activeTab, setActiveTab] = useState<"income" | "expense" | "setup">("income");
+  const [activeTab, setActiveTab] = useState<"income" | "expense" | "setup" | "settings">("income");
   
   // Editing states
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -374,6 +374,7 @@ const AdminPanel = () => {
   const [newProject, setNewProject] = useState({ name: "", category_id: "", description: "" });
   const [newIncome, setNewIncome] = useState({ receipt_number: "", amount: "", project_id: "", donor_name: "", date: new Date().toISOString().split("T")[0], notes: "" });
   const [newExpense, setNewExpense] = useState({ amount: "", project_id: "", description: "", date: new Date().toISOString().split("T")[0] });
+  const [passwords, setPasswords] = useState({ currentPassword: "", newPassword: "", confirmPassword: "" });
 
   const fetchData = async () => {
     const [c, p, i, e] = await Promise.all([
@@ -444,6 +445,24 @@ const AdminPanel = () => {
     alert(editingId ? "Expense updated!" : "Expense added!");
   };
 
+  const handleChangePassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (passwords.newPassword !== passwords.confirmPassword) {
+      alert("New passwords do not match!");
+      return;
+    }
+    try {
+      await api.changePassword({
+        currentPassword: passwords.currentPassword,
+        newPassword: passwords.newPassword
+      });
+      alert("Password changed successfully!");
+      setPasswords({ currentPassword: "", newPassword: "", confirmPassword: "" });
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
   const startEditCategory = (cat: Category) => {
     setEditingId(cat.id);
     setNewCat(cat.name);
@@ -485,7 +504,7 @@ const AdminPanel = () => {
       <div className="flex items-center justify-between mb-8">
         <h1 className="text-2xl font-bold text-zinc-900">Admin Dashboard</h1>
         <div className="flex bg-zinc-100 p-1 rounded-lg">
-          {(["income", "expense", "setup"] as const).map((tab) => (
+          {(["income", "expense", "setup", "settings"] as const).map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -849,6 +868,54 @@ const AdminPanel = () => {
                   </div>
                 ))}
               </div>
+            </div>
+          </motion.div>
+        )}
+        {activeTab === "settings" && (
+          <motion.div
+            key="settings"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="max-w-md mx-auto"
+          >
+            <div className="bg-white p-6 rounded-2xl border border-zinc-200 shadow-sm">
+              <h2 className="text-lg font-bold mb-6">Change Password</h2>
+              <form onSubmit={handleChangePassword} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 mb-1">Current Password</label>
+                  <input
+                    type="password"
+                    value={passwords.currentPassword}
+                    onChange={(e) => setPasswords({ ...passwords, currentPassword: e.target.value })}
+                    className="w-full px-4 py-2 border border-zinc-300 rounded-lg outline-none focus:ring-2 focus:ring-emerald-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 mb-1">New Password</label>
+                  <input
+                    type="password"
+                    value={passwords.newPassword}
+                    onChange={(e) => setPasswords({ ...passwords, newPassword: e.target.value })}
+                    className="w-full px-4 py-2 border border-zinc-300 rounded-lg outline-none focus:ring-2 focus:ring-emerald-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-zinc-700 mb-1">Confirm New Password</label>
+                  <input
+                    type="password"
+                    value={passwords.confirmPassword}
+                    onChange={(e) => setPasswords({ ...passwords, confirmPassword: e.target.value })}
+                    className="w-full px-4 py-2 border border-zinc-300 rounded-lg outline-none focus:ring-2 focus:ring-emerald-500"
+                    required
+                  />
+                </div>
+                <button type="submit" className="w-full bg-zinc-900 text-white font-bold py-2 rounded-lg hover:bg-zinc-800 transition-colors">
+                  Update Password
+                </button>
+              </form>
             </div>
           </motion.div>
         )}

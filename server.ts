@@ -40,6 +40,33 @@ const authenticate = (req: any, res: any, next: any) => {
 
 // API Routes
 
+// Connection Check
+app.get("/api/health-check", async (req, res) => {
+  try {
+    const { data, error } = await supabase.from("admin").select("count", { count: "exact", head: true });
+    if (error) throw error;
+    res.json({ status: "connected", message: "Successfully connected to Supabase", adminCount: data });
+  } catch (err: any) {
+    res.status(500).json({ status: "error", message: err.message, details: "Check your SUPABASE_URL and SUPABASE_ANON_KEY" });
+  }
+});
+
+// Setup Admin (Run once if login fails)
+app.get("/api/setup-admin", async (req, res) => {
+  try {
+    const hashedPassword = bcrypt.hashSync("admin123", 10);
+    const { data, error } = await supabase
+      .from("admin")
+      .upsert([{ username: "admin", password: hashedPassword }], { onConflict: "username" })
+      .select();
+
+    if (error) throw error;
+    res.json({ message: "Admin user 'admin' initialized with password 'admin123'", data });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Public Stats
 app.get("/api/stats", async (req, res) => {
   try {
@@ -93,6 +120,32 @@ app.post("/api/login", async (req, res) => {
     }
   } catch (err: any) {
     res.status(401).json({ error: "Invalid credentials" });
+  }
+});
+
+app.post("/api/change-password", authenticate, async (req: any, res) => {
+  const { currentPassword, newPassword } = req.body;
+  const username = req.user.username;
+
+  try {
+    const { data: admin, error } = await supabase.from("admin").select("*").eq("username", username).single();
+    if (error || !admin) throw new Error("User not found");
+
+    if (!bcrypt.compareSync(currentPassword, admin.password)) {
+      return res.status(400).json({ error: "Current password incorrect" });
+    }
+
+    const hashedNewPassword = bcrypt.hashSync(newPassword, 10);
+    const { error: updateError } = await supabase
+      .from("admin")
+      .update({ password: hashedNewPassword })
+      .eq("username", username);
+
+    if (updateError) throw updateError;
+
+    res.json({ message: "Password updated successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 
